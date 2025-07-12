@@ -215,7 +215,8 @@ def add_kernel(x_ptr, z_ptr, N0, B0: tl.constexpr):
     # We name the offsets of the pointers as "off_"
     off_x = tl.arange(0, B0)
     x = tl.load(x_ptr + off_x)
-    # Finish me!
+    z = x + 10.0
+    tl.store(z_ptr + off_x, z)
     return
 
 
@@ -237,6 +238,12 @@ def add2_spec(x: Float32[200,]) -> Float32[200,]:
 @triton.jit
 def add_mask2_kernel(x_ptr, z_ptr, N0, B0: tl.constexpr):
     # Finish me!
+    pid = tl.program_id(0) # block ID
+    idx = pid * B0 + tl.arange(0, B0)
+    mask = idx < N0
+    x = tl.load(x_ptr+idx, mask)
+    z = x + 10.0
+    tl.store(z_ptr+idx, z, mask)
     return
 
 
@@ -260,6 +267,13 @@ def add_vec_spec(x: Float32[32,], y: Float32[32,]) -> Float32[32, 32]:
 @triton.jit
 def add_vec_kernel(x_ptr, y_ptr, z_ptr, N0, N1, B0: tl.constexpr, B1: tl.constexpr):
     # Finish me!
+    x_off = tl.arange(0, B0)
+    y_off = tl.arange(0, B1)
+    x = tl.load(x_ptr+x_off)
+    y = tl.load(y_ptr+y_off)
+    z_off = y_off[:, None] * B0 + x_off[None, :]
+    z = x[None, :] + y[:, None]
+    tl.store(z_ptr+z_off, z)
     return
 
 
@@ -286,7 +300,16 @@ def add_vec_block_kernel(
 ):
     block_id_x = tl.program_id(0)
     block_id_y = tl.program_id(1)
-    # Finish me!
+    x_off = tl.arange(0, B0)
+    y_off = tl.arange(0, B1)
+    x_idx = block_id_x*B0+x_off
+    y_idx = block_id_y*B1+y_off
+    x = tl.load(x_ptr+x_idx, x_idx<N0)
+    y = tl.load(y_ptr+y_idx, y_idx<N1)
+    z_idx = y_idx[:, None] * N0 + x_idx[None, :]
+    mask_z = (y_idx<N1)[:, None] & (x_idx<N0)[None, :]
+    z = x[None, :] + y[:, None]
+    tl.store(z_ptr+z_idx, z, mask_z) # takeaway: mask needs also be broadcasted
     return
 
 
@@ -313,7 +336,17 @@ def mul_relu_block_kernel(
 ):
     block_id_x = tl.program_id(0)
     block_id_y = tl.program_id(1)
-    # Finish me!
+    x_off = block_id_x * B0 + tl.arange(0, B0)
+    y_off = block_id_y * B1 + tl.arange(0, B1)
+    x_mask = x_off < N0
+    y_mask = y_off < N1
+    x = tl.load(x_ptr+x_off, x_mask)
+    y = tl.load(y_ptr+y_off, y_mask)
+    z = x[None, :] * y[:, None]
+    z = tl.maximum(z, 0)
+    z_off = y_off[:, None] * N0 + x_off[None, :]
+    z_mask = x_mask[None, :] & y_mask[:, None]
+    tl.store(z_ptr+z_off, z, z_mask)
     return
 
 
@@ -354,6 +387,23 @@ def mul_relu_block_back_kernel(
     block_id_i = tl.program_id(0)
     block_id_j = tl.program_id(1)
     # Finish me!
+    i_off = block_id_i * B0 + tl.arange(0, B0)
+    j_off = block_id_j * B1 + tl.arange(0, B1) # also y_off
+    x_off = j_off[:, None] * N0 + i_off[None, :] # also z_off
+
+    i_mask = i_off < N0
+    j_mask = j_off < N1
+    x_mask = j_mask[:, None] & i_mask[None, :]
+
+    x = tl.load(x_ptr+x_off, x_mask)
+    y = tl.load(y_ptr+j_off, j_mask)
+    dz = tl.load(dz_ptr+x_off, x_mask)
+
+    f = x * y[:, None]
+    df = tl.where(f > 0, 1.0, 0.0)
+    
+    dx = y[:, None] * dz * df
+    tl.store(dx_ptr+x_off, dx, x_mask)
     return
 
 
