@@ -622,6 +622,45 @@ def flashatt_kernel(
     log2_e = 1.44269504
     myexp = lambda x: tl.exp2(log2_e * x)
     # Finish me!
+    i_off = block_id_i * B0 + tl.arange(0, B0)
+    i_mask = i_off < N0
+    
+    q_start = q_ptr + i_off
+    z_start = z_ptr + i_off
+
+    q = tl.load(q_start, i_mask, 0.0)
+
+    o_chunk = tl.zeros((B0,), dtype=tl.float32)
+    row_max = tl.full((B0,), -float('inf'), dtype=tl.float32)
+    row_d = tl.zeros((B0,), dtype=tl.float32)
+
+    for j in range(0, T, B1):
+        j_off = j + tl.arange(0, B1)
+        j_mask = j_off < T
+
+        ji_mask = i_mask[:, None] & j_mask[None, :]
+
+        k_start = k_ptr + j_off
+        v_start = v_ptr + j_off
+
+        k = tl.load(k_start, j_mask, 0.0)
+        v = tl.load(v_start, j_mask, 0.0)
+        
+        x = q[:, None] * k[None, :] + tl.where(ji_mask, 0, -1.0e6)
+        new_row_max = tl.maximum(row_max, tl.max(x, axis=1))
+
+        exp_x = myexp(x - new_row_max[:, None])
+        factor = myexp(row_max - new_row_max)
+        new_d = row_d * factor + tl.sum(exp_x, axis=1)
+
+        qkv = exp_x * v[None, :] / new_d[:, None]
+        # o_chunk = o_chunk * row_d * myexp(row_max - new_row_max) / new_d  + tl.sum(qkv, axis=-1)
+        o_chunk = tl.fma(o_chunk, row_d * myexp(row_max - new_row_max) / new_d, tl.sum(qkv, axis=-1))
+        
+        row_d = new_d
+        row_max = new_row_max
+    
+    tl.store(z_start, o_chunk, i_mask)
     return
 
 
