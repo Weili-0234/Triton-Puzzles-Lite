@@ -429,6 +429,17 @@ def sum_spec(x: Float32[4, 200]) -> Float32[4,]:
 @triton.jit
 def sum_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
     # Finish me!
+    block_id_i = tl.program_id(0)
+    j_idx = tl.arange(0, B1)
+    row_start = x_ptr + block_id_i * T
+    z = 0.0 
+    # z = tl.zeros((1), dtype=x_ptr.dtype.element_ty)
+    for j in range(0, T, B1):
+        col_off = j + j_idx
+        z_mask = col_off < T
+        sub_z = tl.load(row_start+col_off, z_mask, 0.0)
+        z += tl.sum(sub_z)
+    tl.store(z_ptr+block_id_i, z)
     return
 
 
@@ -466,10 +477,49 @@ def softmax_spec(x: Float32[4, 200]) -> Float32[4, 200]:
 
 @triton.jit
 def softmax_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
-    """2 loops ver."""
+    """2 loops ver. c.f. Online Softmax"""
     block_id_i = tl.program_id(0)
     log2_e = 1.44269504
     # Finish me!
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    i_mask = off_i < N0
+
+    x_row_start = x_ptr + off_i * T
+    z_row_start = z_ptr + off_i * T
+
+    j_idx = tl.arange(0, B1)
+    # first pass: find row_max, compute denomenator per row
+    row_max = tl.full((B0,), -float('inf'), dtype=tl.float32)
+    row_sum = tl.full((B0,), 0.0, dtype=tl.float32)
+
+    for j in range(0, T, B1):
+        col_off = j + j_idx
+        j_mask = col_off < T
+        
+        x_chunk_ptr = x_row_start[:, None] + col_off[None, :]
+        ij_mask = i_mask[:, None] & j_mask[None, :]
+
+        x_chunk = tl.load(x_chunk_ptr, ij_mask, float('-inf'))
+        chunk_max = tl.max(x_chunk, axis=1)
+
+        new_max = tl.maximum(row_max, chunk_max)
+        row_sum = row_sum * tl.exp2(log2_e * (row_max - new_max)) + tl.exp2(log2_e * (x_chunk - new_max)).sum(axis=1)
+        row_max = new_max
+
+    # second pass: 
+    for j in range(0, T, B1):
+        col_off = j + j_idx
+        j_mask = col_off < T
+
+        x_chunk_ptr = x_row_start[:, None] + col_off[None, :]
+        z_chunk_ptr = z_row_start[:, None] + col_off[None, :]
+        ij_mask = i_mask[:, None] & j_mask[None, :]
+
+        x_chunk = tl.load(x_chunk_ptr, ij_mask, 0.0)
+        exp_x_chunk = tl.exp2(log2_e * (x_chunk - row_max[:, None]))
+        z_normal = exp_x_chunk/row_sum[:, None]
+
+        tl.store(z_chunk_ptr, z_normal, ij_mask)
     return
 
 
@@ -481,6 +531,59 @@ def softmax_kernel_brute_force(
     block_id_i = tl.program_id(0)
     log2_e = 1.44269504
     # Finish me!
+    off_i = block_id_i * B0 + tl.arange(0, B0)
+    i_mask = off_i < N0
+
+    x_row_start = x_ptr + off_i * T
+    z_row_start = z_ptr + off_i * T
+
+    j_idx = tl.arange(0, B1)
+
+    # first pass: find max in each row
+    row_max = tl.full((B0, ), -float('inf'), dtype=tl.float32)
+    for j in range(0, T, B1):
+        col_off = j + j_idx
+        j_mask = col_off < T
+        
+        x_chunk_ptr = x_row_start[:, None] + col_off[None, :]
+        ij_mask = i_mask[:, None] & j_mask[None, :]
+
+        x_chunk = tl.load(x_chunk_ptr, ij_mask, float('-inf'))
+        chunk_max = tl.max(x_chunk, axis=1)
+        row_max = tl.maximum(row_max, chunk_max)
+    
+    # second pass: compute exp(x - row_max) for each element
+    row_sum = tl.full((B0,), 0.0, dtype=tl.float32)
+    for j in range(0, T, B1):
+        col_off = j + j_idx
+        j_mask = col_off < T
+
+        x_chunk_ptr = x_row_start[:, None] + col_off[None, :]
+        ij_mask = i_mask[:, None] & j_mask[None, :]
+
+        x_chunk = tl.load(x_chunk_ptr, ij_mask, float('-inf'))
+        exp_x_chunk = tl.exp2(log2_e * (x_chunk - row_max[None, :]))
+        row_sum += tl.sum(exp_x_chunk, axis=1)
+
+        # tl.store(z_row_start[:, None]+col_off[None, :], exp_x_chunk, ij_mask)
+    
+    for j in range(0, T, B1):
+        col_off = j + j_idx
+        j_mask = col_off < T
+
+        x_chunk_ptr = x_row_start[:, None] + col_off[None, :]
+        z_chunk_ptr = z_row_start[:, None] + col_off[None, :]
+        ij_mask = i_mask[:, None] & j_mask[None, :]
+
+        # z_chunk = tl.load(z_chunk_ptr, ij_mask, 0.0)
+        # z_normal = z_chunk/row_sum[:, None]
+
+        # tl.store(z_chunk_ptr, z_normal, ij_mask)
+        x_chunk = tl.load(x_chunk_ptr, ij_mask, 0.0)
+        exp_x_chunk = tl.exp2(log2_e * (x_chunk - row_max[:, None]))
+        z_normal = exp_x_chunk/row_sum[:, None]
+
+        tl.store(z_chunk_ptr, z_normal, ij_mask)
     return
 
 
@@ -766,7 +869,8 @@ def run_puzzles(args, puzzles: List[int]):
     if 8 in puzzles:
         print("Puzzle #8:")
         ok = test(
-            softmax_kernel,
+            # softmax_kernel,
+            softmax_kernel_brute_force,
             softmax_spec,
             B={"B0": 1, "B1": 32},
             nelem={"N0": 4, "N1": 32, "T": 200},
